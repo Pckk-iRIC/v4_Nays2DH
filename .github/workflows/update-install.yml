@@ -17,7 +17,6 @@ jobs:
     runs-on: windows-2022
     env:
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-      INSTALL_EXE: install/Nays2DH.exe
     steps:
       - name: リポジトリをデフォルトブランチから取得
         uses: actions/checkout@v4
@@ -53,6 +52,10 @@ jobs:
             $activeText,
             '(?i)(?<![A-Za-z0-9_])ifx(?:\.exe)?(?![A-Za-z0-9_])'
           )
+          $hasInstallTarget = [regex]::IsMatch(
+            $activeText,
+            '(?i)(?:^|[\s"''=])(?:\.[\\/])?install(?:[\\/]|[\s"''$]|$)'
+          )
 
           if (($hasIfort -and $hasIfx) -or (-not $hasIfort -and -not $hasIfx)) {
             throw 'make.batからifortまたはifxを一意に検出できません。安全のためビルドを中止します。'
@@ -61,7 +64,11 @@ jobs:
           $compiler = if ($hasIfort) { 'ifort' } else { 'ifx' }
           "compiler=$compiler" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "DETECTED_COMPILER=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $installTargetValue = $hasInstallTarget.ToString().ToLowerInvariant()
+          "install-target=$installTargetValue" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "MAKEBAT_HAS_INSTALL_TARGET=$installTargetValue" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "make.batから検出したコンパイラ: $compiler"
+          Write-Host "make.batのinstall配置処理: $installTargetValue"
 
       - name: Intel Fortran（ifort）環境を構築
         if: steps.detect-compiler.outputs.compiler == 'ifort'
@@ -136,16 +143,30 @@ jobs:
       - name: ビルド前に既存の出力を削除
         shell: pwsh
         run: |
-          $paths = @(
-            (Join-Path $env:GITHUB_WORKSPACE 'Nays2DH.exe'),
-            (Join-Path $env:GITHUB_WORKSPACE $env:INSTALL_EXE)
+          $installDirectory = Join-Path $env:GITHUB_WORKSPACE 'install'
+          New-Item -ItemType Directory -Force -Path $installDirectory | Out-Null
+
+          $beforeInstallExePath = Join-Path $env:RUNNER_TEMP 'install-exe-before.json'
+          $beforeInstallExes = @(
+            Get-ChildItem -Path (Join-Path $installDirectory '*.exe') -File -ErrorAction SilentlyContinue |
+              ForEach-Object {
+                [PSCustomObject]@{
+                  Name = $_.Name
+                  Hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+                }
+              }
           )
-          foreach ($path in $paths) {
-            if (Test-Path -LiteralPath $path -PathType Leaf) {
-              Remove-Item -LiteralPath $path -Force
-            }
+          if ($beforeInstallExes.Count -eq 0) {
+            '[]' | Set-Content -LiteralPath $beforeInstallExePath -Encoding utf8
+          } else {
+            $beforeInstallExes | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $beforeInstallExePath -Encoding utf8
           }
-          Get-ChildItem -LiteralPath $env:GITHUB_WORKSPACE -File -Include '*.obj', '*.mod' -ErrorAction SilentlyContinue |
+
+          Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE '*.exe') -File -ErrorAction SilentlyContinue |
+            Remove-Item -Force
+          Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE '*.obj') -File -ErrorAction SilentlyContinue |
+            Remove-Item -Force
+          Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE '*.mod') -File -ErrorAction SilentlyContinue |
             Remove-Item -Force
 
       - name: make.batでソルバーをビルド
@@ -157,14 +178,58 @@ jobs:
             throw "make.batの実行に失敗しました。終了コード: $exitCode"
           }
 
-          $exePath = Join-Path $env:GITHUB_WORKSPACE $env:INSTALL_EXE
-          if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
-            throw "ビルド出力が見つかりません: $exePath"
+          $installDirectory = Join-Path $env:GITHUB_WORKSPACE 'install'
+          $beforeInstallExePath = Join-Path $env:RUNNER_TEMP 'install-exe-before.json'
+          $beforeInstallExes = @()
+          if (Test-Path -LiteralPath $beforeInstallExePath -PathType Leaf) {
+            $beforeJson = Get-Content -LiteralPath $beforeInstallExePath -Raw
+            if (-not [string]::IsNullOrWhiteSpace($beforeJson)) {
+              $beforeInstallExes = @(ConvertFrom-Json $beforeJson)
+            }
           }
-          if ((Get-Item -LiteralPath $exePath).Length -eq 0) {
-            throw "ビルド出力が空です: $exePath"
+          $beforeHashes = @{}
+          foreach ($entry in $beforeInstallExes) {
+            $beforeHashes[[string]$entry.Name] = [string]$entry.Hash
           }
-          Write-Host "ビルド出力: $exePath"
+
+          $installCandidates = @(
+            Get-ChildItem -Path (Join-Path $installDirectory '*.exe') -File -ErrorAction SilentlyContinue |
+              Where-Object {
+                $currentHash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+                $oldHash = $beforeHashes[$_.Name]
+                [string]::IsNullOrWhiteSpace($oldHash) -or $currentHash -ne $oldHash
+              }
+          )
+          $rootCandidates = @(
+            Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE '*.exe') -File -ErrorAction SilentlyContinue
+          )
+
+          if ($installCandidates.Count -eq 0) {
+            if ($rootCandidates.Count -ne 1) {
+              throw "installへの新しいexeが見つからず、ルートのexeも一意に特定できません。検出数: $($rootCandidates.Count)"
+            }
+            $sourceExe = $rootCandidates[0]
+            $destinationExe = Join-Path $installDirectory $sourceExe.Name
+            Move-Item -LiteralPath $sourceExe.FullName -Destination $destinationExe -Force
+            $installCandidates = @(Get-Item -LiteralPath $destinationExe)
+            if ($env:MAKEBAT_HAS_INSTALL_TARGET -eq 'true') {
+              Write-Warning 'make.batにinstall配置処理はありますが、更新されたexeを検出できなかったため、ルートのexeをinstallへ移動しました。'
+            } else {
+              Write-Host 'make.batにinstallへの配置処理がないため、ルートのexeをWorkflow側でinstallへ移動しました。'
+            }
+          }
+
+          if ($installCandidates.Count -ne 1) {
+            throw "署名対象のexeを一意に特定できません。検出数: $($installCandidates.Count)"
+          }
+
+          $targetExe = $installCandidates[0]
+          $targetRelativePath = "install/$($targetExe.Name)"
+          "TARGET_EXE=$targetRelativePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if ($targetExe.Length -eq 0) {
+            throw "ビルド出力が空です: $targetRelativePath"
+          }
+          Write-Host "ビルド出力: $targetRelativePath"
 
       - name: 署名Secretを検証
         shell: pwsh
@@ -208,7 +273,7 @@ jobs:
           dotnet tool install --tool-path $toolPath AzureSignTool --version 7.0.1
           $toolPath | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Nays2DH.exeに署名
+      - name: 生成されたexeに署名
         shell: pwsh
         env:
           AZURE_KEY_VAULT_URI: ${{ secrets.AZURE_KEY_VAULT_URI }}
@@ -217,7 +282,7 @@ jobs:
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
           AZURE_CERT_NAME: ${{ secrets.AZURE_CERT_NAME }}
         run: |
-          $exePath = Join-Path $env:GITHUB_WORKSPACE $env:INSTALL_EXE
+          $exePath = Join-Path $env:GITHUB_WORKSPACE $env:TARGET_EXE
           & AzureSignTool sign `
             -kvu $env:AZURE_KEY_VAULT_URI `
             -kvi $env:AZURE_CLIENT_ID `
@@ -230,7 +295,7 @@ jobs:
             -v `
             $exePath
           if ($LASTEXITCODE -ne 0) {
-            throw "Nays2DH.exeの署名に失敗しました。終了コード: $LASTEXITCODE"
+            throw "生成されたexeの署名に失敗しました。終了コード: $LASTEXITCODE"
           }
 
       - name: 署名とタイムスタンプを検証
@@ -239,7 +304,7 @@ jobs:
         env:
           AZURE_EXPECTED_SIGNER_THUMBPRINT: ${{ secrets.AZURE_EXPECTED_SIGNER_THUMBPRINT }}
         run: |
-          $exePath = Join-Path $env:GITHUB_WORKSPACE $env:INSTALL_EXE
+          $exePath = Join-Path $env:GITHUB_WORKSPACE $env:TARGET_EXE
           $signature = Get-AuthenticodeSignature -LiteralPath $exePath
           $failureReasons = @()
           $signerThumbprint = $null
@@ -392,7 +457,7 @@ jobs:
           $body = @"
           ## 概要
 
-          手動実行されたWorkflowで`install/Nays2DH.exe`をビルド・署名しました。
+          手動実行されたWorkflowで`$($env:TARGET_EXE)`をビルド・署名しました。
 
           - コンパイラ: `$($env:DETECTED_COMPILER)`
           - 署名検証: 成功

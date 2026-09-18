@@ -2,7 +2,7 @@
 
 ## 概要
 
-`.github/workflows/update-install.yml` は、手動実行でソルバーをビルドし、署名した `install/Nays2DH.exe` をデフォルトブランチへ反映するWorkflowです。
+`.github/workflows/update-install.yml` は、手動実行でソルバーをビルドし、生成されたexeを `install` ディレクトリへ反映するWorkflowです。
 
 このWorkflowは `online_update_v4` などの外部リポジトリを操作しません。デフォルトブランチへの反映後に既存の `build.yml` が発火することはあります。
 
@@ -28,6 +28,16 @@ Workflowは常にビルド・署名・`install`更新まで実行します。`bu
 環境構築には `fortran-lang/setup-fortran@v1` を使用します。ifortは `intel-classic` 2021.10、ifxは `intel` 2025.0です。
 
 したがって、コンパイラを変更するときはWorkflowの実行入力ではなく、検証済みの `make.bat` を更新します。
+
+## installへの配置
+
+Workflowはビルド前に `install` ディレクトリを作成します。
+
+- `make.bat` にinstallへの配置処理がある場合は、更新されたexeを使用します
+- 配置処理がない場合は、ルートで生成されたexeをファイル名を変えずに `install` へ移動します
+- 配置処理もルートのexeも一意に特定できない場合は、誤った成果物を署名しないため失敗します
+
+このため、現在のように `make.bat` がinstallへのコピーを担当する構成と、ルートにだけexeを生成する構成の両方に対応できます。
 
 ## Secret
 
@@ -55,7 +65,7 @@ gh secret set AZURE_EXPECTED_SIGNER_THUMBPRINT --repo Pckk-iRIC/v4_Nays2DH
 2. `make.bat` のコンパイラを検出
 3. 対応するIntel FortranとVisual Studio環境を構築
 4. `make.bat` を実行
-5. `install/Nays2DH.exe` にAzureSignToolで署名
+5. `install` 内の生成されたexeにAzureSignToolで署名
 6. 署名とタイムスタンプを検証
 7. `install` 以外を含めずにコミット
 8. デフォルトブランチへ直接プッシュ

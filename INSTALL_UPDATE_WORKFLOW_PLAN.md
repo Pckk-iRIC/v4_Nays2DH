@@ -14,7 +14,7 @@
 - デフォルトブランチを対象としたビルド
 - `make.bat` に定義された ifort ビルド環境の構築
 - `make.bat` によるソルバーのビルド
-- `install/Nays2DH.exe` の更新
+- ビルドで生成されたexeの `install` への更新
 - Azure Key Vault の証明書を使った exe 署名
 - 署名の検証
 - `install` だけを変更する commit と、直接 push 失敗時の Pull Request
@@ -31,11 +31,11 @@
 
 現在の `.github/workflows/build.yml` は `main` / `master` への push で発火し、`online_update_v4` への反映まで行う。
 
-そのため、新しい Workflow が `install/Nays2DH.exe` を更新した場合、直接 push が成功すればそのまま既存 Workflow が発火し、失敗時だけ更新ブランチと Pull Request を経由する。
+そのため、新しい Workflow が `install` 内の生成済みexeを更新した場合、直接 push が成功すればそのまま既存 Workflow が発火し、失敗時だけ更新ブランチと Pull Request を経由する。
 
 ```text
 新 Workflow
-  └─ install/Nays2DH.exe をビルド・署名
+  └─ install内の生成されたexeをビルド・署名
   └─ default branch へ直接 push
         ├─ 成功: push による既存 Workflow の発火
         └─ 失敗: 更新ブランチへ push、Pull Request を作成
@@ -56,7 +56,9 @@
 
 - `make.bat` が要求する ifort / Visual Studio 環境を構築する
 - リポジトリの `make.bat` をそのまま実行する
-- ビルド出力を `install/Nays2DH.exe` として確認する
+- `install` ディレクトリがなければWorkflow側で作成する
+- `make.bat` にinstallへの配置処理がなければ、ルートのビルド出力をWorkflow側でinstallへ移動する
+- ビルド出力を `install` 内の生成されたexeとして確認する
 - 署名と検証を行う
 - `install` の変更だけを commit し、デフォルトブランチへの直接 push を試行する
 - デフォルトブランチへの直接 push を試行し、失敗時だけ Pull Request を作成する
@@ -87,7 +89,7 @@
 - Visual Studio のリンカーが PATH / LIB に設定されていること
 - `intel64`、x64 を対象にしていること
 - コンパイル前に `.obj`、`.mod`、既存 exe を削除すること
-- コンパイル終了後に `install/Nays2DH.exe` が存在し、サイズが 0 ではないこと
+- コンパイル終了後に `install` 内の生成されたexeが存在し、サイズが 0 ではないこと
 
 Cabernet2D の参考 Workflow では ifx 用の `fortran-lang/setup-fortran@v1` を使用しているが、今回の Workflow では手動入力によるコンパイラ切り替え方式を採用しない。現在は ifort 用の Intel oneAPI バージョンと導入方法を固定し、将来 ifx が検出された場合の環境構築経路も YAML に用意する。
 
@@ -102,6 +104,9 @@ Workflow は `workflow_dispatch` の入力でコンパイラを指定しない�
 - `rem` / `::` などのコメント行は検出対象から除外する
 - ifort と ifx の両方、またはどちらも検出できない場合は、安全側に倒してビルドを開始せず失敗させる
 - 検出後も `make.bat` 自体は書き換えず、引数なしで実行する
+- `make.bat` の有効な行にinstallへの配置処理があるかを検出する
+- 配置処理がない場合は、ビルド後にルートのexeをファイル名を変えずに `install` へ移動する
+- 配置処理もルートのビルド出力も一意に特定できない場合は、安全側に失敗させる
 
 現在の環境構築は `fortran-lang/setup-fortran@v1` の `intel-classic` 2021.10 をifort用、`intel` 2025.0をifx用に使用する。Intelの古いHPCKitダウンロードURLには依存しない。
 
@@ -112,7 +117,7 @@ Workflow は `workflow_dispatch` の入力でコンパイラを指定しない�
 ```text
 build
   ↓
-install/Nays2DH.exe の存在・サイズ確認
+install内の生成されたexeの存在・サイズ確認
   ↓
 AzureSignTool で署名
   ↓
@@ -123,7 +128,7 @@ install の差分を確認
 commit / Pull Request
 ```
 
-今回の `install` には現時点で `Nays2DH.exe` が実行ファイルとして存在するため、初期スコープではこの exe を署名対象とする。将来 `.dll` などの PE ファイルを同梱する場合は、署名対象へ追加する。
+現時点では `install` 内の生成されたexeを署名対象とする。将来 `.dll` などの PE ファイルを同梱する場合は、署名対象へ追加する。
 
 署名方式と Secret 名は、Cabernet2D の既存 Workflow と合わせる。Secret の値はこの文書やリポジトリには記載しない。
 
@@ -154,7 +159,7 @@ commit / Pull Request
 
 1. デフォルトブランチを checkout
 2. ビルド・署名・検証を実行
-3. `install/Nays2DH.exe` だけを commit
+3. `install` 内の生成されたexeだけを commit
 4. default branch へ直接 push を試行
 5. push 成功時は処理を完了し、既存 `build.yml` の発火を待つ
 6. push 失敗時は同じ commit を更新ブランチへ push
@@ -177,7 +182,7 @@ commit / Pull Request
 - 直接 push の失敗時だけ更新ブランチと Pull Request を作成する
 - 同じソルバーの更新は `concurrency` で直列化する
 - 既存の未コミット差分があれば開始時に失敗させる
-- 変更対象を `install/Nays2DH.exe` に限定する
+- 変更対象を `install` ディレクトリに限定する
 - ビルド出力の存在・サイズを検証する
 - 署名検証に失敗した場合は commit しない
 - 署名済み exe と検証レポートを Artifact に保存する
@@ -214,7 +219,7 @@ commit / Pull Request
 ## 完了条件
 
 - 引数なしで `make.bat` を実行したビルドが成功する
-- `install/Nays2DH.exe` が更新される
+- `install` 内の生成されたexeが更新される
 - exe の署名とタイムスタンプを検証できる
 - `AZURE_EXPECTED_SIGNER_THUMBPRINT` が登録されている場合に署名者 Thumbprint を検証できる
 - `install` 以外の差分を commit しない
