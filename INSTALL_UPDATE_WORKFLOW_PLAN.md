@@ -57,7 +57,9 @@
 - `make.bat` が要求する ifort / Visual Studio 環境を構築する
 - リポジトリの `make.bat` をそのまま実行する
 - `install` ディレクトリがなければWorkflow側で作成する
-- `make.bat` にinstallへの配置処理がなければ、ルートのビルド出力をWorkflow側でinstallへ移動する
+- `make.bat` はリポジトリ直下から実行するが、exeの出力ディレクトリやファイル名はWorkflowで固定しない
+- ビルド前後のリポジトリ配下のexeを比較し、`make.bat`が配置した場所から生成物を検出する
+- `install` 外に生成されたexeは、元のファイル名のままWorkflow側で `install` へ移動する
 - ビルド出力を `install` 内の生成されたexeとして確認する
 - 署名と検証を行う
 - `install` の変更だけを commit し、デフォルトブランチへの直接 push を試行する
@@ -104,9 +106,10 @@ Workflow は `workflow_dispatch` の入力でコンパイラを指定しない�
 - `rem` / `::` などのコメント行は検出対象から除外する
 - ifort と ifx の両方、またはどちらも検出できない場合は、安全側に倒してビルドを開始せず失敗させる
 - 検出後も `make.bat` 自体は書き換えず、引数なしで実行する
-- `make.bat` の有効な行にinstallへの配置処理があるかを検出する
-- 配置処理がない場合は、ビルド後にルートのexeをファイル名を変えずに `install` へ移動する
-- 配置処理もルートのビルド出力も一意に特定できない場合は、安全側に失敗させる
+- `make.bat` はリポジトリ直下に固定し、相対パスはリポジトリルートから解決する
+- exeの保存場所やファイル名はWorkflowにハードコードせず、ビルド前後の差分から検出する
+- `make.bat` が `install` 外へ配置したexeは、検出した場所から `install` へ移動する
+- 複数の更新exeや出力未検出など、成果物を一意に特定できない場合は安全側に失敗させる
 
 現在の環境構築は `fortran-lang/setup-fortran@v1` の `intel-classic` 2021.10 をifort用、`intel` 2025.0をifx用に使用する。Intelの古いHPCKitダウンロードURLには依存しない。
 

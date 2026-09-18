@@ -52,11 +52,6 @@ jobs:
             $activeText,
             '(?i)(?<![A-Za-z0-9_])ifx(?:\.exe)?(?![A-Za-z0-9_])'
           )
-          $hasInstallTarget = [regex]::IsMatch(
-            $activeText,
-            '(?i)(?:^|[\s"''=])(?:\.[\\/])?install(?:[\\/]|[\s"''$]|$)'
-          )
-
           if (($hasIfort -and $hasIfx) -or (-not $hasIfort -and -not $hasIfx)) {
             throw 'make.batからifortまたはifxを一意に検出できません。安全のためビルドを中止します。'
           }
@@ -64,11 +59,7 @@ jobs:
           $compiler = if ($hasIfort) { 'ifort' } else { 'ifx' }
           "compiler=$compiler" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "DETECTED_COMPILER=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          $installTargetValue = $hasInstallTarget.ToString().ToLowerInvariant()
-          "install-target=$installTargetValue" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "MAKEBAT_HAS_INSTALL_TARGET=$installTargetValue" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "make.batから検出したコンパイラ: $compiler"
-          Write-Host "make.batのinstall配置処理: $installTargetValue"
 
       - name: Intel Fortran（ifort）環境を構築
         if: steps.detect-compiler.outputs.compiler == 'ifort'
@@ -140,33 +131,34 @@ jobs:
             throw 'Visual StudioのLIBが設定されていません。'
           }
 
-      - name: ビルド前に既存の出力を削除
+      - name: ビルド前にexeの出力を記録
         shell: pwsh
         run: |
+          $workspaceRoot = (Get-Item -LiteralPath $env:GITHUB_WORKSPACE).FullName.TrimEnd('\')
           $installDirectory = Join-Path $env:GITHUB_WORKSPACE 'install'
           New-Item -ItemType Directory -Force -Path $installDirectory | Out-Null
 
-          $beforeInstallExePath = Join-Path $env:RUNNER_TEMP 'install-exe-before.json'
-          $beforeInstallExes = @(
-            Get-ChildItem -Path (Join-Path $installDirectory '*.exe') -File -ErrorAction SilentlyContinue |
+          $beforeExePath = Join-Path $env:RUNNER_TEMP 'workspace-exe-before.json'
+          $beforeExes = @(
+            Get-ChildItem -LiteralPath $workspaceRoot -Filter '*.exe' -File -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -notlike (Join-Path $workspaceRoot '.git\*') } |
               ForEach-Object {
+                $relativePath = [IO.Path]::GetRelativePath($workspaceRoot, $_.FullName).Replace('\', '/')
                 [PSCustomObject]@{
-                  Name = $_.Name
+                  Path = $relativePath
                   Hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
                 }
               }
           )
-          if ($beforeInstallExes.Count -eq 0) {
-            '[]' | Set-Content -LiteralPath $beforeInstallExePath -Encoding utf8
+          if ($beforeExes.Count -eq 0) {
+            '[]' | Set-Content -LiteralPath $beforeExePath -Encoding utf8
           } else {
-            $beforeInstallExes | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $beforeInstallExePath -Encoding utf8
+            $beforeExes | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $beforeExePath -Encoding utf8
           }
 
-          Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE '*.exe') -File -ErrorAction SilentlyContinue |
+          Get-ChildItem -LiteralPath $workspaceRoot -Filter '*.obj' -File -ErrorAction SilentlyContinue |
             Remove-Item -Force
-          Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE '*.obj') -File -ErrorAction SilentlyContinue |
-            Remove-Item -Force
-          Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE '*.mod') -File -ErrorAction SilentlyContinue |
+          Get-ChildItem -LiteralPath $workspaceRoot -Filter '*.mod' -File -ErrorAction SilentlyContinue |
             Remove-Item -Force
 
       - name: make.batでソルバーをビルド
@@ -178,53 +170,63 @@ jobs:
             throw "make.batの実行に失敗しました。終了コード: $exitCode"
           }
 
-          $installDirectory = Join-Path $env:GITHUB_WORKSPACE 'install'
-          $beforeInstallExePath = Join-Path $env:RUNNER_TEMP 'install-exe-before.json'
-          $beforeInstallExes = @()
-          if (Test-Path -LiteralPath $beforeInstallExePath -PathType Leaf) {
-            $beforeJson = Get-Content -LiteralPath $beforeInstallExePath -Raw
+          $workspaceRoot = (Get-Item -LiteralPath $env:GITHUB_WORKSPACE).FullName.TrimEnd('\')
+          $installDirectory = Join-Path $workspaceRoot 'install'
+          $beforeExePath = Join-Path $env:RUNNER_TEMP 'workspace-exe-before.json'
+          $beforeExes = @()
+          if (Test-Path -LiteralPath $beforeExePath -PathType Leaf) {
+            $beforeJson = Get-Content -LiteralPath $beforeExePath -Raw
             if (-not [string]::IsNullOrWhiteSpace($beforeJson)) {
-              $beforeInstallExes = @(ConvertFrom-Json $beforeJson)
+              $beforeExes = @(ConvertFrom-Json $beforeJson)
             }
           }
           $beforeHashes = @{}
-          foreach ($entry in $beforeInstallExes) {
-            $beforeHashes[[string]$entry.Name] = [string]$entry.Hash
+          foreach ($entry in $beforeExes) {
+            $beforeHashes[[string]$entry.Path] = [string]$entry.Hash
           }
 
-          $installCandidates = @(
-            Get-ChildItem -Path (Join-Path $installDirectory '*.exe') -File -ErrorAction SilentlyContinue |
-              Where-Object {
+          $changedExes = @(
+            Get-ChildItem -LiteralPath $workspaceRoot -Filter '*.exe' -File -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -notlike (Join-Path $workspaceRoot '.git\*') } |
+              ForEach-Object {
+                $relativePath = [IO.Path]::GetRelativePath($workspaceRoot, $_.FullName).Replace('\', '/')
                 $currentHash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
-                $oldHash = $beforeHashes[$_.Name]
-                [string]::IsNullOrWhiteSpace($oldHash) -or $currentHash -ne $oldHash
+                $oldHash = $beforeHashes[$relativePath]
+                if ([string]::IsNullOrWhiteSpace($oldHash) -or $currentHash -ne $oldHash) {
+                  [PSCustomObject]@{
+                    FullName = $_.FullName
+                    Name = $_.Name
+                    Path = $relativePath
+                    Hash = $currentHash
+                  }
+                }
               }
           )
-          $rootCandidates = @(
-            Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE '*.exe') -File -ErrorAction SilentlyContinue
+
+          $installCandidates = @(
+            $changedExes | Where-Object { $_.Path -match '^install/' }
+          )
+          $externalCandidates = @(
+            $changedExes | Where-Object { $_.Path -notmatch '^install/' }
           )
 
           if ($installCandidates.Count -eq 0) {
-            if ($rootCandidates.Count -ne 1) {
-              throw "installへの新しいexeが見つからず、ルートのexeも一意に特定できません。検出数: $($rootCandidates.Count)"
+            if ($externalCandidates.Count -ne 1) {
+              throw "make.bat実行後に更新されたexeを一意に特定できません。install外の検出数: $($externalCandidates.Count)"
             }
-            $sourceExe = $rootCandidates[0]
+            $sourceExe = Get-Item -LiteralPath $externalCandidates[0].FullName
             $destinationExe = Join-Path $installDirectory $sourceExe.Name
             Move-Item -LiteralPath $sourceExe.FullName -Destination $destinationExe -Force
-            $installCandidates = @(Get-Item -LiteralPath $destinationExe)
-            if ($env:MAKEBAT_HAS_INSTALL_TARGET -eq 'true') {
-              Write-Warning 'make.batにinstall配置処理はありますが、更新されたexeを検出できなかったため、ルートのexeをinstallへ移動しました。'
-            } else {
-              Write-Host 'make.batにinstallへの配置処理がないため、ルートのexeをWorkflow側でinstallへ移動しました。'
-            }
+            $targetExe = Get-Item -LiteralPath $destinationExe
+            Write-Host "make.batが配置したexeをinstallへ取り込みました: $($externalCandidates[0].Path) -> install/$($sourceExe.Name)"
+          } elseif ($installCandidates.Count -eq 1) {
+            $targetExe = Get-Item -LiteralPath $installCandidates[0].FullName
+            Write-Host "make.batがinstallへ配置したexeを使用します: $($installCandidates[0].Path)"
+          } else {
+            throw "install内の更新されたexeを一意に特定できません。検出数: $($installCandidates.Count)"
           }
 
-          if ($installCandidates.Count -ne 1) {
-            throw "署名対象のexeを一意に特定できません。検出数: $($installCandidates.Count)"
-          }
-
-          $targetExe = $installCandidates[0]
-          $targetRelativePath = "install/$($targetExe.Name)"
+          $targetRelativePath = [IO.Path]::GetRelativePath($workspaceRoot, $targetExe.FullName).Replace('\', '/')
           "TARGET_EXE=$targetRelativePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           if ($targetExe.Length -eq 0) {
             throw "ビルド出力が空です: $targetRelativePath"
