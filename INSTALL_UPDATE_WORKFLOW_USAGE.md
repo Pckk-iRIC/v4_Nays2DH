@@ -25,6 +25,8 @@ Workflowは常にビルド・署名・`install`更新まで実行します。`bu
 - ifortとifxの両方、またはどちらも検出できない場合はビルドを中止します
 - 検出後も `make.bat` は書き換えず、引数なしで実行します
 
+環境構築には `fortran-lang/setup-fortran@v1` を使用します。ifortは `intel-classic` 2021.10、ifxは `intel` 2025.0です。
+
 したがって、コンパイラを変更するときはWorkflowの実行入力ではなく、検証済みの `make.bat` を更新します。
 
 ## Secret

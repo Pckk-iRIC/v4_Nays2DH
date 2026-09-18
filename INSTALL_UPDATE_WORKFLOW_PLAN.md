@@ -103,6 +103,8 @@ Workflow は `workflow_dispatch` の入力でコンパイラを指定しない�
 - ifort と ifx の両方、またはどちらも検出できない場合は、安全側に倒してビルドを開始せず失敗させる
 - 検出後も `make.bat` 自体は書き換えず、引数なしで実行する
 
+現在の環境構築は `fortran-lang/setup-fortran@v1` の `intel-classic` 2021.10 をifort用、`intel` 2025.0をifx用に使用する。Intelの古いHPCKitダウンロードURLには依存しない。
+
 ## 署名
 
 署名は次の順番で実行する。
